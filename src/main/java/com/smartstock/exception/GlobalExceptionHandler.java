@@ -1,12 +1,13 @@
 package com.smartstock.exception;
 
 import com.smartstock.dto.ApiError;
+import jakarta.persistence.OptimisticLockException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
-import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -40,14 +41,33 @@ public class GlobalExceptionHandler {
         return buildError(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI(), null);
     }
 
-    @ExceptionHandler(OptimisticLockingFailureException.class)
+    @ExceptionHandler(ReservationStateException.class)
+    public ResponseEntity<ApiError> handleReservationState(
+            ReservationStateException ex,
+            HttpServletRequest request
+    ) {
+        return buildError(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI(), null);
+    }
+
+    @ExceptionHandler(OrderStateException.class)
+    public ResponseEntity<ApiError> handleOrderState(
+            OrderStateException ex,
+            HttpServletRequest request
+    ) {
+        return buildError(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI(), null);
+    }
+
+    @ExceptionHandler({
+            OptimisticLockingFailureException.class,
+            OptimisticLockException.class
+    })
     public ResponseEntity<ApiError> handleOptimisticLock(
-            OptimisticLockingFailureException ex,
+            RuntimeException ex,
             HttpServletRequest request
     ) {
         return buildError(
                 HttpStatus.CONFLICT,
-                "Inventory was changed by another request; reload it and retry",
+                "Inventory changed while processing the reservation; reload stock and retry",
                 request.getRequestURI(),
                 null
         );
@@ -84,7 +104,7 @@ public class GlobalExceptionHandler {
     ) {
         return buildError(
                 HttpStatus.CONFLICT,
-                "Duplicate SKU or data integrity violation",
+                "Data integrity constraint violation",
                 request.getRequestURI(),
                 null
         );

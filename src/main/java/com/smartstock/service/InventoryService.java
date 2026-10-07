@@ -11,6 +11,8 @@ import com.smartstock.exception.ResourceNotFoundException;
 import com.smartstock.repository.InventoryRepository;
 import com.smartstock.repository.ProductRepository;
 import java.math.BigInteger;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,7 @@ public class InventoryService {
     }
 
     @Transactional
+    @CacheEvict(cacheNames = "inventoryByProductId", key = "#request.productId")
     public InventoryResponse create(CreateInventoryRequest request) {
         Product product = productRepository.findById(request.productId())
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -59,11 +62,13 @@ public class InventoryService {
         }
     }
 
+    @Cacheable(cacheNames = "inventoryByProductId", key = "#productId", unless = "#result == null")
     public InventoryResponse findByProductId(Long productId) {
         return toResponse(getInventory(productId));
     }
 
     @Transactional
+    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse adjust(Long productId, AdjustInventoryRequest request) {
         Inventory inventory = getInventory(productId);
         long adjustedQuantity;
@@ -78,6 +83,7 @@ public class InventoryService {
     }
 
     @Transactional
+    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse addStock(Long productId, AdjustInventoryRequest request) {
         requirePositiveQuantity(request.quantity());
         Inventory inventory = getInventory(productId);
@@ -92,6 +98,7 @@ public class InventoryService {
     }
 
     @Transactional
+    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse removeStock(Long productId, AdjustInventoryRequest request) {
         requirePositiveQuantity(request.quantity());
         Inventory inventory = getInventory(productId);

@@ -8,6 +8,10 @@ import com.smartstock.exception.DuplicateResourceException;
 import com.smartstock.exception.ResourceNotFoundException;
 import com.smartstock.repository.ProductRepository;
 import java.util.List;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,6 +26,10 @@ public class ProductService {
     }
 
     @Transactional
+    @Caching(put = {
+            @CachePut(cacheNames = "productById", key = "#result.id"),
+            @CachePut(cacheNames = "productBySku", key = "#result.sku")
+    })
     public ProductResponse create(CreateProductRequest request) {
         String sku = request.sku().trim();
         if (productRepository.existsBySku(sku)) {
@@ -45,10 +53,12 @@ public class ProductService {
                 .toList();
     }
 
+    @Cacheable(cacheNames = "productById", key = "#id", unless = "#result == null")
     public ProductResponse findById(Long id) {
         return toResponse(getProduct(id));
     }
 
+    @Cacheable(cacheNames = "productBySku", key = "#sku", unless = "#result == null")
     public ProductResponse findBySku(String sku) {
         Product product = productRepository.findBySku(sku)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found with sku: " + sku));
@@ -56,6 +66,8 @@ public class ProductService {
     }
 
     @Transactional
+    @Caching(put = @CachePut(cacheNames = "productById", key = "#id"),
+            evict = @CacheEvict(cacheNames = "productBySku", allEntries = true))
     public ProductResponse update(Long id, UpdateProductRequest request) {
         Product product = getProduct(id);
         String sku = request.sku().trim();
@@ -75,6 +87,10 @@ public class ProductService {
     }
 
     @Transactional
+    @Caching(evict = {
+            @CacheEvict(cacheNames = "productById", key = "#id"),
+            @CacheEvict(cacheNames = "productBySku", allEntries = true)
+    })
     public void delete(Long id) {
         Product product = getProduct(id);
         productRepository.delete(product);
