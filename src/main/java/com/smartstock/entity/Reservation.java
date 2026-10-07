@@ -12,6 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.Index;
 import jakarta.persistence.Version;
 import java.time.Instant;
 import org.springframework.data.annotation.CreatedDate;
@@ -19,7 +20,10 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 @Entity
-@Table(name = "reservations")
+@Table(name = "reservations", indexes = {
+        @Index(name = "idx_reservations_status_expires_at", columnList = "status, expires_at"),
+        @Index(name = "idx_reservations_product_id", columnList = "product_id")
+})
 @EntityListeners(AuditingEntityListener.class)
 public class Reservation {
 
@@ -30,6 +34,9 @@ public class Reservation {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "product_id", nullable = false)
     private Product product;
+
+    @Column(name = "customer_id")
+    private Long customerId;
 
     @Column(nullable = false)
     private long quantity;
@@ -63,6 +70,10 @@ public class Reservation {
     public Long getProductId() {
         return product.getId();
     }
+
+    public Long getCustomerId() { return customerId; }
+
+    public void setCustomerId(Long customerId) { this.customerId = customerId; }
 
     public long getQuantity() {
         return quantity;

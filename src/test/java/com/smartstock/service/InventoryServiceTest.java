@@ -35,6 +35,9 @@ class InventoryServiceTest {
     @Mock
     private ProductRepository productRepository;
 
+    @Mock
+    private CacheInvalidationService cacheInvalidationService;
+
     @InjectMocks
     private InventoryService inventoryService;
 
@@ -63,7 +66,7 @@ class InventoryServiceTest {
         when(inventoryRepository.saveAndFlush(any(Inventory.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        var response = inventoryService.create(new CreateInventoryRequest(1L, 8L, null));
+        var response = inventoryService.create(new CreateInventoryRequest(1L, 8L));
 
         assertThat(response.productId()).isEqualTo(1L);
         assertThat(response.availableQuantity()).isEqualTo(8L);
@@ -74,7 +77,7 @@ class InventoryServiceTest {
     void createRejectsUnknownProduct() {
         when(productRepository.findById(99L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> inventoryService.create(new CreateInventoryRequest(99L, 0L, null)))
+        assertThatThrownBy(() -> inventoryService.create(new CreateInventoryRequest(99L, 0L)))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("99");
     }
@@ -84,7 +87,7 @@ class InventoryServiceTest {
         when(productRepository.findById(1L)).thenReturn(Optional.of(product));
         when(inventoryRepository.existsByProduct_Id(1L)).thenReturn(true);
 
-        assertThatThrownBy(() -> inventoryService.create(new CreateInventoryRequest(1L, 0L, null)))
+        assertThatThrownBy(() -> inventoryService.create(new CreateInventoryRequest(1L, 0L)))
                 .isInstanceOf(DuplicateResourceException.class)
                 .hasMessageContaining("Inventory already exists");
     }

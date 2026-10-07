@@ -8,10 +8,9 @@ import com.smartstock.exception.DuplicateResourceException;
 import com.smartstock.exception.ResourceNotFoundException;
 import com.smartstock.repository.ProductRepository;
 import java.util.List;
-import org.springframework.cache.annotation.CacheEvict;
-import org.springframework.cache.annotation.CachePut;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,16 +19,14 @@ import org.springframework.transaction.annotation.Transactional;
 public class ProductService {
 
     private final ProductRepository productRepository;
+    private final CacheInvalidationService cacheInvalidationService;
 
-    public ProductService(ProductRepository productRepository) {
+    public ProductService(ProductRepository productRepository, CacheInvalidationService cacheInvalidationService) {
         this.productRepository = productRepository;
+        this.cacheInvalidationService = cacheInvalidationService;
     }
 
     @Transactional
-    @Caching(put = {
-            @CachePut(cacheNames = "productById", key = "#result.id"),
-            @CachePut(cacheNames = "productBySku", key = "#result.sku")
-    })
     public ProductResponse create(CreateProductRequest request) {
         String sku = request.sku().trim();
         if (productRepository.existsBySku(sku)) {
@@ -47,10 +44,17 @@ public class ProductService {
         return toResponse(productRepository.save(product));
     }
 
-    public List<ProductResponse> findAll() {
-        return productRepository.findAll().stream()
+    public List<ProductResponse> findAll(int page, int size) {
+        validatePage(page, size);
+        return productRepository.findAll(PageRequest.of(page, size, Sort.by("id").ascending())).stream()
                 .map(this::toResponse)
                 .toList();
+    }
+
+    private void validatePage(int page, int size) {
+        if (page < 0 || size < 1 || size > 100) {
+            throw new IllegalArgumentException("page must be non-negative and size must be between 1 and 100");
+        }
     }
 
     @Cacheable(cacheNames = "productById", key = "#id", unless = "#result == null")
@@ -66,10 +70,9 @@ public class ProductService {
     }
 
     @Transactional
-    @Caching(put = @CachePut(cacheNames = "productById", key = "#id"),
-            evict = @CacheEvict(cacheNames = "productBySku", allEntries = true))
     public ProductResponse update(Long id, UpdateProductRequest request) {
         Product product = getProduct(id);
+        String oldSku = product.getSku();
         String sku = request.sku().trim();
 
         if (productRepository.existsBySkuAndIdNot(sku, id)) {
@@ -83,17 +86,20 @@ public class ProductService {
         product.setCategory(request.category());
         product.setActive(request.active());
 
-        return toResponse(productRepository.save(product));
+        ProductResponse response = toResponse(productRepository.save(product));
+        cacheInvalidationService.enqueue("productById", id);
+        cacheInvalidationService.enqueue("productBySku", oldSku);
+        cacheInvalidationService.enqueue("productBySku", sku);
+        return response;
     }
 
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(cacheNames = "productById", key = "#id"),
-            @CacheEvict(cacheNames = "productBySku", allEntries = true)
-    })
     public void delete(Long id) {
         Product product = getProduct(id);
+        String sku = product.getSku();
         productRepository.delete(product);
+        cacheInvalidationService.enqueue("productById", id);
+        cacheInvalidationService.enqueue("productBySku", sku);
     }
 
     private Product getProduct(Long id) {

@@ -1,9 +1,17 @@
 server:
   port: ${SERVER_PORT:0}
 
+app:
+  security:
+    enabled: false
+
 spring:
   application:
     name: smartstock
+  security:
+    user:
+      name: test-admin
+      password: test-password
   config:
     import: optional:file:.env[.properties]
   datasource:
@@ -11,13 +19,21 @@ spring:
     username: sa
     password:
     driver-class-name: org.h2.Driver
+  flyway:
+    enabled: false
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      password: test-password
   cache:
     type: redis
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    admin:
+      auto-create: false
+    listener:
+      auto-startup: false
   jpa:
     open-in-view: false
     hibernate:

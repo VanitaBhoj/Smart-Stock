@@ -14,6 +14,8 @@ public class ReservationExpirationJob {
 
     @Scheduled(fixedDelayString = "${reservation.expiration-scan-interval-ms:30000}")
     public void expireReservations() {
-        reservationService.expireActiveReservations();
+        while (reservationService.expireActiveReservations() == 100) {
+            // Each batch runs and commits in its own transaction.
+        }
     }
 }

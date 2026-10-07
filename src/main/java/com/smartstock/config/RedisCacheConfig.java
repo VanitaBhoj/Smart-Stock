@@ -6,7 +6,6 @@ import com.smartstock.dto.ProductResponse;
 import java.time.Duration;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
-import org.springframework.cache.transaction.TransactionAwareCacheManagerProxy;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
@@ -28,7 +27,7 @@ public class RedisCacheConfig {
         Jackson2JsonRedisSerializer<ProductResponse> valueSerializer =
                 new Jackson2JsonRedisSerializer<>(objectMapper, ProductResponse.class);
         RedisCacheConfiguration productCache = RedisCacheConfiguration.defaultCacheConfig()
-                .entryTtl(Duration.ofMinutes(30))
+                .entryTtl(Duration.ofMinutes(5))
                 .disableCachingNullValues()
                 .serializeKeysWith(RedisSerializationContext.SerializationPair
                         .fromSerializer(new StringRedisSerializer()))
@@ -38,21 +37,18 @@ public class RedisCacheConfig {
         Jackson2JsonRedisSerializer<InventoryResponse> inventoryValueSerializer =
                 new Jackson2JsonRedisSerializer<>(objectMapper, InventoryResponse.class);
         RedisCacheConfiguration inventoryCache = RedisCacheConfiguration.defaultCacheConfig()
-                .entryTtl(Duration.ofMinutes(5))
+                .entryTtl(Duration.ofSeconds(30))
                 .disableCachingNullValues()
                 .serializeKeysWith(RedisSerializationContext.SerializationPair
                         .fromSerializer(new StringRedisSerializer()))
                 .serializeValuesWith(RedisSerializationContext.SerializationPair
                         .fromSerializer(inventoryValueSerializer));
 
-        RedisCacheManager redisCacheManager = RedisCacheManager.builder(connectionFactory)
+        return RedisCacheManager.builder(connectionFactory)
                 .cacheDefaults(productCache)
                 .withCacheConfiguration("productById", productCache)
                 .withCacheConfiguration("productBySku", productCache)
                 .withCacheConfiguration("inventoryByProductId", inventoryCache)
                 .build();
-
-        // Apply cache writes/evictions only after the surrounding database transaction commits.
-        return new TransactionAwareCacheManagerProxy(redisCacheManager);
     }
 }

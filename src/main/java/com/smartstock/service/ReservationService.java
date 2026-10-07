@@ -16,7 +16,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import org.springframework.cache.annotation.CacheEvict;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,23 +32,34 @@ public class ReservationService {
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
     private final Clock clock;
+    private final CacheInvalidationService cacheInvalidationService;
+    private final InventoryReservationLock inventoryReservationLock;
+    private final OutboxService outboxService;
 
     public ReservationService(
             ReservationRepository reservationRepository,
             ProductRepository productRepository,
             InventoryRepository inventoryRepository,
-            Clock clock
+            Clock clock,
+            CacheInvalidationService cacheInvalidationService,
+            InventoryReservationLock inventoryReservationLock,
+            OutboxService outboxService
     ) {
         this.reservationRepository = reservationRepository;
         this.productRepository = productRepository;
         this.inventoryRepository = inventoryRepository;
         this.clock = clock;
+        this.cacheInvalidationService = cacheInvalidationService;
+        this.inventoryReservationLock = inventoryReservationLock;
+        this.outboxService = outboxService;
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#request.productId")
-    public ReservationResponse create(CreateReservationRequest request) {
+    public ReservationResponse create(CreateReservationRequest request, Long customerId) {
         requirePositiveQuantity(request.quantity());
+        // Serialize same-product allocation attempts across app instances. PostgreSQL's
+        // transaction and Inventory @Version remain the final correctness boundary.
+        inventoryReservationLock.lockProduct(request.productId());
 
         Product product = productRepository.findById(request.productId())
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -71,10 +84,12 @@ public class ReservationService {
                 request.quantity()
         ));
         inventoryRepository.saveAndFlush(inventory);
+        cacheInvalidationService.enqueue("inventoryByProductId", request.productId());
 
         Instant now = Instant.now(clock);
         Reservation reservation = new Reservation();
         reservation.setProduct(product);
+        reservation.setCustomerId(customerId);
         reservation.setQuantity(request.quantity());
         reservation.setStatus(ReservationStatus.ACTIVE);
         reservation.setExpiresAt(now.plus(RESERVATION_LIFETIME));
@@ -83,33 +98,32 @@ public class ReservationService {
     }
 
     @Transactional
-    @CacheEvict(
-            cacheNames = "inventoryByProductId",
-            key = "#result.productId",
-            condition = "#result.status.name() == 'EXPIRED'"
-    )
-    public ReservationResponse findById(Long id) {
+    public ReservationResponse findById(Long id, Long actorId, boolean admin) {
         Reservation reservation = getReservation(id);
+        requireOwnerOrAdmin(reservation, actorId, admin);
         expireIfNecessary(reservation);
         return toResponse(reservation);
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#result.productId")
-    public ReservationResponse confirm(Long id) {
+    public ReservationResponse confirm(Long id, Long actorId, boolean admin) {
         Reservation reservation = getReservation(id);
+        requireOwnerOrAdmin(reservation, actorId, admin);
         if (expireIfNecessary(reservation)) {
             return toResponse(reservation);
         }
         requireActive(reservation, "confirm");
         reservation.setStatus(ReservationStatus.CONFIRMED);
-        return toResponse(reservationRepository.saveAndFlush(reservation));
+        cacheInvalidationService.enqueue("inventoryByProductId", reservation.getProductId());
+        Reservation saved = reservationRepository.saveAndFlush(reservation);
+        recordReservationEvent("RESERVATION_CREATED", saved);
+        return toResponse(saved);
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#result.productId")
-    public ReservationResponse cancel(Long id) {
+    public ReservationResponse cancel(Long id, Long actorId, boolean admin) {
         Reservation reservation = getReservation(id);
+        requireOwnerOrAdmin(reservation, actorId, admin);
         if (expireIfNecessary(reservation)) {
             return toResponse(reservation);
         }
@@ -127,27 +141,42 @@ public class ReservationService {
                 reservation.getQuantity()
         ));
         inventoryRepository.saveAndFlush(inventory);
+        cacheInvalidationService.enqueue("inventoryByProductId", reservation.getProductId());
 
         reservation.setStatus(ReservationStatus.CANCELLED);
         return toResponse(reservationRepository.saveAndFlush(reservation));
     }
 
     @Transactional
-    @CacheEvict(
-            cacheNames = "inventoryByProductId",
-            allEntries = true,
-            condition = "#result > 0"
-    )
     public int expireActiveReservations() {
         Instant now = Instant.now(clock);
-        List<Reservation> expiredReservations =
-                reservationRepository.findAllByStatusAndExpiresAtLessThanEqual(
-                        ReservationStatus.ACTIVE,
-                        now
+        List<Reservation> expiredReservations = reservationRepository
+                .findTop100ByStatusAndExpiresAtLessThanEqualOrderByExpiresAtAsc(
+                        ReservationStatus.ACTIVE, now
                 );
-        for (Reservation reservation : expiredReservations) {
-            expire(reservation);
+        if (expiredReservations.isEmpty()) {
+            return 0;
         }
+        List<Long> productIds = expiredReservations.stream()
+                .map(Reservation::getProductId).distinct().toList();
+        Map<Long, Inventory> inventories = inventoryRepository.findAllByProduct_IdIn(productIds).stream()
+                .collect(Collectors.toMap(Inventory::getProductId, Function.identity()));
+        for (Reservation reservation : expiredReservations) {
+            Inventory inventory = inventories.get(reservation.getProductId());
+            if (inventory == null) {
+                throw new ResourceNotFoundException(
+                        "Inventory not found for product: " + reservation.getProductId()
+                );
+            }
+            releaseInventory(inventory, reservation);
+            reservation.setStatus(ReservationStatus.EXPIRED);
+            recordReservationEvent("RESERVATION_EXPIRED", reservation);
+        }
+        for (Long productId : productIds) {
+            cacheInvalidationService.enqueue("inventoryByProductId", productId);
+        }
+        inventoryRepository.saveAllAndFlush(inventories.values());
+        reservationRepository.saveAllAndFlush(expiredReservations);
         return expiredReservations.size();
     }
 
@@ -162,6 +191,15 @@ public class ReservationService {
 
     private void expire(Reservation reservation) {
         Inventory inventory = getInventory(reservation.getProductId());
+        releaseInventory(inventory, reservation);
+
+        reservation.setStatus(ReservationStatus.EXPIRED);
+        recordReservationEvent("RESERVATION_EXPIRED", reservation);
+        cacheInvalidationService.enqueue("inventoryByProductId", reservation.getProductId());
+        reservationRepository.saveAndFlush(reservation);
+    }
+
+    private void releaseInventory(Inventory inventory, Reservation reservation) {
         if (inventory.getReservedQuantity() < reservation.getQuantity()) {
             throw new ReservationStateException(
                     "Inventory reserved quantity is inconsistent for reservation "
@@ -173,10 +211,17 @@ public class ReservationService {
                 inventory.getAvailableQuantity(),
                 reservation.getQuantity()
         ));
-        inventoryRepository.saveAndFlush(inventory);
+    }
 
-        reservation.setStatus(ReservationStatus.EXPIRED);
-        reservationRepository.saveAndFlush(reservation);
+    private void recordReservationEvent(String eventType, Reservation reservation) {
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("reservationId", reservation.getId());
+        payload.put("productId", reservation.getProductId());
+        payload.put("customerId", reservation.getCustomerId());
+        payload.put("quantity", reservation.getQuantity());
+        payload.put("status", reservation.getStatus());
+        payload.put("expiresAt", reservation.getExpiresAt());
+        outboxService.record(eventType, "RESERVATION", reservation.getId(), payload);
     }
 
     private Reservation getReservation(Long id) {
@@ -199,6 +244,13 @@ public class ReservationService {
                     "Cannot " + action + " reservation " + reservation.getId()
                             + " because its status is " + reservation.getStatus()
             );
+        }
+    }
+
+    private void requireOwnerOrAdmin(Reservation reservation, Long actorId, boolean admin) {
+        if (!admin && (reservation.getCustomerId() == null
+                || !reservation.getCustomerId().equals(actorId))) {
+            throw new ResourceNotFoundException("Reservation not found with id: " + reservation.getId());
         }
     }
 

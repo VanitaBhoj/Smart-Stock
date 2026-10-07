@@ -10,19 +10,55 @@ spring:
     url: ${DB_URL}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      password: ${REDIS_PASSWORD}
   cache:
     type: redis
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:smartstock-business-events}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:true}
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: ${JPA_DDL_AUTO:update}
+      ddl-auto: ${JPA_DDL_AUTO:validate}
     show-sql: ${JPA_SHOW_SQL:false}
 
 logging:
   level:
     org.springframework: ${LOGGING_LEVEL_SPRING:INFO}
+
+reservation:
+  expiration-scan-interval-ms: ${RESERVATION_EXPIRATION_SCAN_INTERVAL_MS:30000}
+
+smartstock:
+  inventory-lock:
+    lease-duration-ms: ${INVENTORY_RESERVATION_LOCK_LEASE_MS:30000}
+    key-prefix: ${INVENTORY_RESERVATION_LOCK_KEY_PREFIX:smartstock:lock:inventory:}
+  kafka:
+    business-events-topic: ${KAFKA_BUSINESS_EVENTS_TOPIC:smartstock.business-events}
+
+cache:
+  invalidation-scan-interval-ms: ${CACHE_INVALIDATION_SCAN_INTERVAL_MS:5000}
+
+outbox:
+  publisher-interval-ms: ${OUTBOX_PUBLISHER_INTERVAL_MS:5000}

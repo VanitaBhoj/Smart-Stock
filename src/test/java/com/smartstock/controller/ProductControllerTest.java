@@ -24,12 +24,14 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 @WebMvcTest(ProductController.class)
+@AutoConfigureMockMvc(addFilters = false)
 @Import(GlobalExceptionHandler.class)
 class ProductControllerTest {
 
@@ -109,7 +111,7 @@ class ProductControllerTest {
 
     @Test
     void findAllReturns200() throws Exception {
-        when(productService.findAll()).thenReturn(List.of(sampleResponse()));
+        when(productService.findAll(0, 50)).thenReturn(List.of(sampleResponse()));
 
         mockMvc.perform(get("/api/products"))
                 .andExpect(status().isOk())
@@ -124,6 +126,22 @@ class ProductControllerTest {
         mockMvc.perform(get("/api/products/99"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.message").value("Product not found with id: 99"));
+    }
+
+    @Test
+    void unexpectedErrorsReturnSanitizedConsistentResponse() throws Exception {
+        when(productService.findById(77L))
+                .thenThrow(new IllegalStateException("jdbc:postgresql://internal-db/password"));
+
+        mockMvc.perform(get("/api/products/77"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.error").value("INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.path").value("/api/products/77"))
+                .andExpect(jsonPath("$.message").value("An unexpected error occurred."))
+                .andExpect(jsonPath("$.message").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("postgresql"))
+                ));
     }
 
     @Test

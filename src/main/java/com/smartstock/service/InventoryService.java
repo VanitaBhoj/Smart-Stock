@@ -11,7 +11,6 @@ import com.smartstock.exception.ResourceNotFoundException;
 import com.smartstock.repository.InventoryRepository;
 import com.smartstock.repository.ProductRepository;
 import java.math.BigInteger;
-import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -23,17 +22,19 @@ public class InventoryService {
 
     private final InventoryRepository inventoryRepository;
     private final ProductRepository productRepository;
+    private final CacheInvalidationService cacheInvalidationService;
 
     public InventoryService(
             InventoryRepository inventoryRepository,
-            ProductRepository productRepository
+            ProductRepository productRepository,
+            CacheInvalidationService cacheInvalidationService
     ) {
         this.inventoryRepository = inventoryRepository;
         this.productRepository = productRepository;
+        this.cacheInvalidationService = cacheInvalidationService;
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#request.productId")
     public InventoryResponse create(CreateInventoryRequest request) {
         Product product = productRepository.findById(request.productId())
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -49,12 +50,12 @@ public class InventoryService {
         Inventory inventory = new Inventory();
         inventory.setProduct(product);
         inventory.setAvailableQuantity(request.availableQuantity());
-        inventory.setReservedQuantity(
-                request.reservedQuantity() == null ? 0 : request.reservedQuantity()
-        );
+        inventory.setReservedQuantity(0);
 
         try {
-            return toResponse(inventoryRepository.saveAndFlush(inventory));
+            InventoryResponse response = toResponse(inventoryRepository.saveAndFlush(inventory));
+            cacheInvalidationService.enqueue("inventoryByProductId", request.productId());
+            return response;
         } catch (DataIntegrityViolationException ex) {
             throw new DuplicateResourceException(
                     "Inventory already exists for product: " + request.productId()
@@ -68,7 +69,6 @@ public class InventoryService {
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse adjust(Long productId, AdjustInventoryRequest request) {
         Inventory inventory = getInventory(productId);
         long adjustedQuantity;
@@ -79,11 +79,12 @@ public class InventoryService {
         }
         ensureAvailable(inventory, adjustedQuantity, request.quantity());
         inventory.setAvailableQuantity(adjustedQuantity);
-        return toResponse(inventoryRepository.saveAndFlush(inventory));
+        InventoryResponse response = toResponse(inventoryRepository.saveAndFlush(inventory));
+        cacheInvalidationService.enqueue("inventoryByProductId", productId);
+        return response;
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse addStock(Long productId, AdjustInventoryRequest request) {
         requirePositiveQuantity(request.quantity());
         Inventory inventory = getInventory(productId);
@@ -94,18 +95,21 @@ public class InventoryService {
             throw new IllegalArgumentException("Inventory quantity exceeds the supported range");
         }
         inventory.setAvailableQuantity(updatedQuantity);
-        return toResponse(inventoryRepository.saveAndFlush(inventory));
+        InventoryResponse response = toResponse(inventoryRepository.saveAndFlush(inventory));
+        cacheInvalidationService.enqueue("inventoryByProductId", productId);
+        return response;
     }
 
     @Transactional
-    @CacheEvict(cacheNames = "inventoryByProductId", key = "#productId")
     public InventoryResponse removeStock(Long productId, AdjustInventoryRequest request) {
         requirePositiveQuantity(request.quantity());
         Inventory inventory = getInventory(productId);
         long updatedQuantity = inventory.getAvailableQuantity() - request.quantity();
         ensureAvailable(inventory, updatedQuantity, -request.quantity());
         inventory.setAvailableQuantity(updatedQuantity);
-        return toResponse(inventoryRepository.saveAndFlush(inventory));
+        InventoryResponse response = toResponse(inventoryRepository.saveAndFlush(inventory));
+        cacheInvalidationService.enqueue("inventoryByProductId", productId);
+        return response;
     }
 
     private Inventory getInventory(Long productId) {

@@ -32,6 +32,9 @@ class ProductServiceTest {
     @Mock
     private ProductRepository productRepository;
 
+    @Mock
+    private CacheInvalidationService cacheInvalidationService;
+
     @InjectMocks
     private ProductService productService;
 
@@ -99,9 +102,10 @@ class ProductServiceTest {
 
     @Test
     void findAllMapsEntitiesToResponses() {
-        when(productRepository.findAll()).thenReturn(List.of(existing));
+        when(productRepository.findAll(any(org.springframework.data.domain.Pageable.class)))
+                .thenReturn(new org.springframework.data.domain.PageImpl<>(List.of(existing)));
 
-        List<ProductResponse> products = productService.findAll();
+        List<ProductResponse> products = productService.findAll(0, 50);
 
         assertThat(products).hasSize(1);
         assertThat(products.getFirst().sku()).isEqualTo("MOUSE-001");
@@ -122,6 +126,29 @@ class ProductServiceTest {
 
         assertThatThrownBy(() -> productService.update(1L, request))
                 .isInstanceOf(DuplicateResourceException.class);
+    }
+
+    @Test
+    void updatePersistsAndReturnsCurrentProductValues() {
+        UpdateProductRequest request = new UpdateProductRequest(
+                "Updated Mouse",
+                "MOUSE-NEW",
+                "Updated description",
+                new BigDecimal("24.50"),
+                "Accessories",
+                false
+        );
+        when(productRepository.findById(1L)).thenReturn(Optional.of(existing));
+        when(productRepository.existsBySkuAndIdNot("MOUSE-NEW", 1L)).thenReturn(false);
+        when(productRepository.save(existing)).thenReturn(existing);
+
+        ProductResponse response = productService.update(1L, request);
+
+        assertThat(response.name()).isEqualTo("Updated Mouse");
+        assertThat(response.sku()).isEqualTo("MOUSE-NEW");
+        assertThat(response.price()).isEqualByComparingTo("24.50");
+        assertThat(response.active()).isFalse();
+        verify(productRepository).save(existing);
     }
 
     @Test

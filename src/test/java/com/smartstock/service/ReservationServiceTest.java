@@ -44,6 +44,15 @@ class ReservationServiceTest {
     @Mock
     private InventoryRepository inventoryRepository;
 
+    @Mock
+    private CacheInvalidationService cacheInvalidationService;
+
+    @Mock
+    private InventoryReservationLock inventoryReservationLock;
+
+    @Mock
+    private OutboxService outboxService;
+
     private ReservationService reservationService;
     private Product product;
     private Inventory inventory;
@@ -54,7 +63,10 @@ class ReservationServiceTest {
                 reservationRepository,
                 productRepository,
                 inventoryRepository,
-                Clock.fixed(NOW, ZoneOffset.UTC)
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                cacheInvalidationService,
+                inventoryReservationLock,
+                outboxService
         );
 
         product = new Product();
@@ -80,7 +92,7 @@ class ReservationServiceTest {
                     return reservation;
                 });
 
-        var response = reservationService.create(new CreateReservationRequest(1L, 3L));
+        var response = reservationService.create(new CreateReservationRequest(1L, 3L), 900L);
 
         assertThat(inventory.getAvailableQuantity()).isEqualTo(7);
         assertThat(inventory.getReservedQuantity()).isEqualTo(5);
@@ -95,7 +107,7 @@ class ReservationServiceTest {
         when(productRepository.findById(99L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() ->
-                reservationService.create(new CreateReservationRequest(99L, 1L)))
+                reservationService.create(new CreateReservationRequest(99L, 1L), 900L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("Product not found");
 
@@ -103,7 +115,7 @@ class ReservationServiceTest {
         when(inventoryRepository.findByProduct_Id(1L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() ->
-                reservationService.create(new CreateReservationRequest(1L, 1L)))
+                reservationService.create(new CreateReservationRequest(1L, 1L), 900L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("Inventory not found");
     }
@@ -114,7 +126,7 @@ class ReservationServiceTest {
         when(inventoryRepository.findByProduct_Id(1L)).thenReturn(Optional.of(inventory));
 
         assertThatThrownBy(() ->
-                reservationService.create(new CreateReservationRequest(1L, 11L)))
+                reservationService.create(new CreateReservationRequest(1L, 11L), 900L))
                 .isInstanceOf(InsufficientStockException.class)
                 .hasMessageContaining("requested reservation 11");
 
@@ -128,7 +140,7 @@ class ReservationServiceTest {
         when(reservationRepository.findById(4L)).thenReturn(Optional.of(reservation));
         when(reservationRepository.saveAndFlush(reservation)).thenReturn(reservation);
 
-        var response = reservationService.confirm(4L);
+        var response = reservationService.confirm(4L, 900L, false);
 
         assertThat(response.status()).isEqualTo(ReservationStatus.CONFIRMED);
         verify(inventoryRepository, never()).saveAndFlush(any(Inventory.class));
@@ -139,7 +151,7 @@ class ReservationServiceTest {
         Reservation reservation = reservation(ReservationStatus.CANCELLED, NOW.plusSeconds(60));
         when(reservationRepository.findById(4L)).thenReturn(Optional.of(reservation));
 
-        assertThatThrownBy(() -> reservationService.confirm(4L))
+        assertThatThrownBy(() -> reservationService.confirm(4L, 900L, false))
                 .isInstanceOf(ReservationStateException.class)
                 .hasMessageContaining("status is CANCELLED");
     }
@@ -149,7 +161,7 @@ class ReservationServiceTest {
         Reservation reservation = reservation(ReservationStatus.CONFIRMED, NOW.plusSeconds(60));
         when(reservationRepository.findById(4L)).thenReturn(Optional.of(reservation));
 
-        assertThatThrownBy(() -> reservationService.cancel(4L))
+        assertThatThrownBy(() -> reservationService.cancel(4L, 900L, false))
                 .isInstanceOf(ReservationStateException.class)
                 .hasMessageContaining("status is CONFIRMED");
 
@@ -161,7 +173,7 @@ class ReservationServiceTest {
         Reservation reservation = reservation(ReservationStatus.EXPIRED, NOW.plusSeconds(60));
         when(reservationRepository.findById(4L)).thenReturn(Optional.of(reservation));
 
-        assertThatThrownBy(() -> reservationService.confirm(4L))
+        assertThatThrownBy(() -> reservationService.confirm(4L, 900L, false))
                 .isInstanceOf(ReservationStateException.class)
                 .hasMessageContaining("status is EXPIRED");
     }
@@ -174,7 +186,7 @@ class ReservationServiceTest {
         when(inventoryRepository.saveAndFlush(inventory)).thenReturn(inventory);
         when(reservationRepository.saveAndFlush(reservation)).thenReturn(reservation);
 
-        var response = reservationService.cancel(4L);
+        var response = reservationService.cancel(4L, 900L, false);
 
         assertThat(response.status()).isEqualTo(ReservationStatus.CANCELLED);
         assertThat(inventory.getAvailableQuantity()).isEqualTo(12);
@@ -189,7 +201,7 @@ class ReservationServiceTest {
         when(inventoryRepository.saveAndFlush(inventory)).thenReturn(inventory);
         when(reservationRepository.saveAndFlush(reservation)).thenReturn(reservation);
 
-        var response = reservationService.confirm(4L);
+        var response = reservationService.confirm(4L, 900L, false);
 
         assertThat(response.status()).isEqualTo(ReservationStatus.EXPIRED);
         assertThat(inventory.getAvailableQuantity()).isEqualTo(12);
@@ -199,10 +211,11 @@ class ReservationServiceTest {
     @Test
     void scheduledExpirationFindsAndExpiresDueActiveReservations() {
         Reservation reservation = reservation(ReservationStatus.ACTIVE, NOW);
-        when(reservationRepository.findAllByStatusAndExpiresAtLessThanEqual(
-                ReservationStatus.ACTIVE,
-                NOW
+        when(reservationRepository.findTop100ByStatusAndExpiresAtLessThanEqualOrderByExpiresAtAsc(
+                org.mockito.ArgumentMatchers.eq(ReservationStatus.ACTIVE),
+                org.mockito.ArgumentMatchers.eq(NOW)
         )).thenReturn(List.of(reservation));
+        when(inventoryRepository.findAllByProduct_IdIn(List.of(1L))).thenReturn(List.of(inventory));
         when(inventoryRepository.findByProduct_Id(1L)).thenReturn(Optional.of(inventory));
         when(inventoryRepository.saveAndFlush(inventory)).thenReturn(inventory);
         when(reservationRepository.saveAndFlush(reservation)).thenReturn(reservation);
@@ -218,6 +231,7 @@ class ReservationServiceTest {
     private Reservation reservation(ReservationStatus status, Instant expiresAt) {
         Reservation reservation = new Reservation();
         reservation.setProduct(product);
+        reservation.setCustomerId(900L);
         reservation.setQuantity(2);
         reservation.setStatus(status);
         reservation.setExpiresAt(expiresAt);

@@ -6,9 +6,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartstock.entity.Inventory;
 import com.smartstock.entity.Product;
+import com.smartstock.entity.Reservation;
+import com.smartstock.entity.ReservationStatus;
+import com.smartstock.entity.UserRole;
+import com.smartstock.security.SmartStockPrincipal;
+import com.smartstock.dto.InventoryResponse;
 import com.smartstock.repository.InventoryRepository;
 import com.smartstock.repository.ProductRepository;
 import com.smartstock.repository.ReservationRepository;
+import java.time.Instant;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -21,18 +27,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.cache.CacheManager;
-import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
-import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
-@SpringBootTest
+@SpringBootTest(properties = "reservation.expiration-scan-interval-ms=3600000")
 @AutoConfigureMockMvc
-@Import(ReservationConcurrencyIntegrationTest.TestCacheConfiguration.class)
+@Import(IsolatedCacheConfiguration.class)
 class ReservationConcurrencyIntegrationTest {
 
     @Autowired
@@ -49,6 +54,15 @@ class ReservationConcurrencyIntegrationTest {
 
     @Autowired
     private ReservationRepository reservationRepository;
+
+    @Autowired
+    private ReservationService reservationService;
+
+    @MockitoBean
+    private InventoryReservationLock inventoryReservationLock;
+
+    @Autowired
+    private CacheManager cacheManager;
 
     private Long productId;
 
@@ -99,9 +113,7 @@ class ReservationConcurrencyIntegrationTest {
                     .findFirst()
                     .orElseThrow();
             assertThat(objectMapper.readTree(rejected.body()).path("message").asText())
-                    .isEqualTo(
-                            "Inventory changed while processing the reservation; reload stock and retry"
-                    );
+                    .isEqualTo("The resource changed during this request. Reload it and try again.");
 
             Inventory finalInventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
             assertThat(finalInventory.getAvailableQuantity()).isZero();
@@ -111,6 +123,97 @@ class ReservationConcurrencyIntegrationTest {
             startRequests.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void activeExpiredReservationReleasesStockAndExpires() {
+        Inventory inventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        inventory.setAvailableQuantity(0);
+        inventory.setReservedQuantity(1);
+        inventoryRepository.saveAndFlush(inventory);
+        Reservation reservation = saveReservation(ReservationStatus.ACTIVE, Instant.now().minusSeconds(1));
+        cacheManager.getCache("inventoryByProductId").put(
+                productId,
+                new InventoryResponse(inventory.getId(), productId, 0, 1, inventory.getVersion(),
+                        inventory.getCreatedAt(), inventory.getUpdatedAt())
+        );
+
+        assertThat(reservationService.expireActiveReservations()).isEqualTo(1);
+
+        Reservation saved = reservationRepository.findById(reservation.getId()).orElseThrow();
+        Inventory updated = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(ReservationStatus.EXPIRED);
+        assertThat(updated.getAvailableQuantity()).isEqualTo(1);
+        assertThat(updated.getReservedQuantity()).isZero();
+        assertThat(cacheManager.getCache("inventoryByProductId").get(productId)).isNull();
+    }
+
+    @Test
+    void activeReservationNotYetExpiredRemainsUnchanged() {
+        Inventory inventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        inventory.setAvailableQuantity(0);
+        inventory.setReservedQuantity(1);
+        inventoryRepository.saveAndFlush(inventory);
+        Reservation reservation = saveReservation(
+                ReservationStatus.ACTIVE,
+                Instant.now().plusSeconds(600)
+        );
+
+        assertThat(reservationService.expireActiveReservations()).isZero();
+
+        assertReservationAndStockUnchanged(reservation.getId(), ReservationStatus.ACTIVE);
+    }
+
+    @Test
+    void confirmedReservationRemainsUnchangedAfterExpiryTime() {
+        Inventory inventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        inventory.setAvailableQuantity(0);
+        inventory.setReservedQuantity(1);
+        inventoryRepository.saveAndFlush(inventory);
+        Reservation reservation = saveReservation(
+                ReservationStatus.CONFIRMED,
+                Instant.now().minusSeconds(600)
+        );
+
+        assertThat(reservationService.expireActiveReservations()).isZero();
+
+        assertReservationAndStockUnchanged(reservation.getId(), ReservationStatus.CONFIRMED);
+    }
+
+    @Test
+    void cancelledReservationRemainsUnchangedAfterExpiryTime() {
+        Inventory inventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        inventory.setAvailableQuantity(0);
+        inventory.setReservedQuantity(1);
+        inventoryRepository.saveAndFlush(inventory);
+        Reservation reservation = saveReservation(
+                ReservationStatus.CANCELLED,
+                Instant.now().minusSeconds(600)
+        );
+
+        assertThat(reservationService.expireActiveReservations()).isZero();
+
+        assertReservationAndStockUnchanged(reservation.getId(), ReservationStatus.CANCELLED);
+    }
+
+    private Reservation saveReservation(ReservationStatus status, Instant expiresAt) {
+        Reservation reservation = new Reservation();
+        reservation.setProduct(productRepository.findById(productId).orElseThrow());
+        reservation.setQuantity(1);
+        reservation.setStatus(status);
+        reservation.setExpiresAt(expiresAt);
+        return reservationRepository.saveAndFlush(reservation);
+    }
+
+    private void assertReservationAndStockUnchanged(
+            Long reservationId,
+            ReservationStatus expectedStatus
+    ) {
+        Reservation saved = reservationRepository.findById(reservationId).orElseThrow();
+        Inventory inventory = inventoryRepository.findByProduct_Id(productId).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(expectedStatus);
+        assertThat(inventory.getAvailableQuantity()).isZero();
+        assertThat(inventory.getReservedQuantity()).isEqualTo(1);
     }
 
     private ReservationAttempt reserveWhenReleased(
@@ -126,26 +229,24 @@ class ReservationConcurrencyIntegrationTest {
     }
 
     private ReservationAttempt reserve(String body) throws Exception {
-        var response = mockMvc.perform(post("/api/reservations")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andReturn()
-                .getResponse();
-        return new ReservationAttempt(response.getStatus(), response.getContentAsString());
+        SmartStockPrincipal principal = new SmartStockPrincipal(900L, "customer", "{noop}test",
+                UserRole.CUSTOMER, true);
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities())
+        );
+        try {
+            var response = mockMvc.perform(post("/api/reservations")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andReturn()
+                    .getResponse();
+            return new ReservationAttempt(response.getStatus(), response.getContentAsString());
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     private record ReservationAttempt(int status, String body) {
     }
 
-    @TestConfiguration
-    static class TestCacheConfiguration {
-
-        @Bean
-        @Primary
-        CacheManager testCacheManager() {
-            return new ConcurrentMapCacheManager(
-                    "productById", "productBySku", "inventoryByProductId"
-            );
-        }
-    }
 }
